@@ -8,6 +8,8 @@
 * Status: **Returned for revision**
 * Implementation: [apple/swift-package-manager#3023](https://github.com/apple/swift-package-manager/pull/3023)
 * Review: [Review](https://forums.swift.org/t/se-0292-package-registry-service/)
+* Previous Revision:
+  [1](https://github.com/apple/swift-evolution/blob/b48527526b5748a60b0b23846d5880e9cc2c4711/proposals/0292-package-registry-service.md)
 
 ## Introduction
 
@@ -15,11 +17,14 @@ Swift Package Manager downloads dependencies using Git.
 Our proposal defines a standard web service interface
 that it can also use to download dependencies from a package registry.
 
+Swift-evolution thread:
+[Swift Package Registry Service](https://forums.swift.org/t/swift-package-registry-service/37219)
+
 ## Motivation
 
-A package dependency is specified by a URL for its source repository.
-When a project is built for the first time,
-Swift Package Manager clones the Git repository for each dependency
+A package dependency is currently specified by a URL to its source repository.
+When Swift Package Manager builds a project for the first time,
+it clones the Git repository for each dependency
 and attempts to resolve the version requirements from the available tags.
 
 Although Git is a capable version-control system,
@@ -28,7 +33,7 @@ it's not well-suited to this kind of workflow for the following reasons:
 * **Reproducibility**:
   A version tag in the Git repository for a dependency
   can be reassigned to another commit at any time.
-  This can cause the same source code to produce different build results
+  This can cause a project to produce different build results
   depending on when it was built.
 * **Availability**:
   The Git repository for a dependency can be moved or deleted,
@@ -38,50 +43,62 @@ it's not well-suited to this kind of workflow for the following reasons:
   downloads all versions of a package when only one is used at a time.
 * **Speed**:
   Cloning a Git repository for a dependency can be slow
-  for repositories with large histories.
+  if it has a large history.
+  Also, cloning a Git repository is expensive for both the server and client,
+  and may be significantly slower than downloading the same content
+  using HTTP through a [content delivery network (CDN)][CDN].
 
-Many language ecosystems have a <dfn>package registry</dfn>, including
+Many language ecosystems have a *package registry*, including
 [RubyGems] for Ruby,
 [PyPI] for Python,
 [npm] for JavaScript, and
 [crates.io] for Rust.
 In fact,
-many Swift developers make apps today using
+many Swift developers build apps today using
 [CocoaPods] and its index of libraries.
 
-A package registry can offer faster and more reliable dependency resolution
+A package registry for Swift Package Manager
+could offer faster and more reliable dependency resolution
 than downloading dependencies using Git.
-It can also support other useful functionality,
-such as:
-
-* **Security advisories**:
-  Vulnerabilities can be communicated directly to package consumers
-  in a timely manner.
-* **Discoverability**:
-  Package maintainers can annotate their releases with project metadata,
-  including its authors, license, and other information.
-* **Search**:
-  A registry can provide a standard interface for searching available packages,
-  or provide the information necessary for others to create a search index.
-* **Flexibility**:
-  Swift Package Manager requires that external dependencies
-  be hosted in a Git repository with a package manifest located in its root.
-  For some projects,
-  this requirement is a barrier to adopting Swift Package Manager.
-  A package registry imposes no requirements on
-  version control software or project structure.
+It could also support other useful functionality,
+including package search, security audits, and local offline caches.
 
 ## Proposed solution
 
-This proposal defines a standard interface for package registry services,
-and describes how Swift Package Manager can integrate with them
+This proposal defines a standard interface for package registry services
+and describes how Swift Package Manager integrates with them
 to download dependencies.
 
-The goal of this proposal is to make dependency resolution
-more available and reproducible.
-We believe our proposed solution
-can meet or exceed the current performance of dependency resolution
-and will allow for new functionality to be built in the future.
+A user may [configure](#registry-configuration-subcommands)
+a package registry for their project
+by specifying a URL to a [conforming web service](#package-registry-service).
+When a registry is configured,
+Swift Package Manager resolves external dependencies
+in the project's package manifest (`Package.swift`) file
+that are [declared](#new-packagedescription-apis)
+with a [scoped package identifier](#package-identity) in the form
+`@scope/PackageName`.
+These package identifiers resolve potential
+[module name collisions](#module-name-collision-resolution)
+across build targets.
+
+For each external dependency declared in the package manifest,
+Swift Package Manager first sends a
+`GET` request to `/{scope}/{name}`
+to fetch a list of available releases
+from the configured registry.
+If a release is found that satisfies the declared version requirement
+(for example, `.upToNextMinor(from: "1.1.0")`),
+Swift Package Manager sends a
+`GET` request to `/{scope}/{name}/{version}/Package.swift`
+to fetch the manifest for that release.
+This process continues with the package manifests of each dependency,
+each of their respective dependencies,
+and so on.
+Once the dependency graph is [resolved](#dependency-graph-resolution),
+Swift Package Manager downloads the
+[source archive](#archive-source-subcommand) for each dependency
+by sending a `GET` request to `/{scope}/{name}/{version}.zip`.
 
 ## Detailed design
 
@@ -92,19 +109,18 @@ for listing releases for a package,
 fetching information about a release,
 and downloading the source archive for a release:
 
-| Method | Path                                                             | Description                                      |
-| ------ | ---------------------------------------------------------------- | ------------------------------------------------ |
-| `GET`  | `/{namespace}/{package}`                                         | List package releases                            |
-| `GET`  | `/{namespace}/{package}/{version}`                               | Fetch metadata for a package release             |
-| `GET`  | `/{namespace}/{package}/{version}/Package.swift{?swift-version}` | Fetch manifest for a package release             |
-| `GET`  | `/{namespace}/{package}/{version}.zip`                           | Download source archive for a package release    |
+| Method | Path                                                      | Description                                   |
+| ------ | --------------------------------------------------------- | --------------------------------------------- |
+| `GET`  | `/{scope}/{name}`                                         | List package releases                         |
+| `GET`  | `/{scope}/{name}/{version}`                               | Fetch metadata for a package release          |
+| `GET`  | `/{scope}/{name}/{version}/Package.swift{?swift-version}` | Fetch manifest for a package release          |
+| `GET`  | `/{scope}/{name}/{version}.zip`                           | Download source archive for a package release |
 
 A formal specification for the package registry interface
 is provided alongside this proposal.
 In addition,
-an OpenAPI (v3) document,
-a reference implementation written in Swift,
-and a benchmarking harness
+an OpenAPI (v3) document
+and a reference implementation written in Swift
 are provided for the convenience of developers interested
 in building their own package registry.
 
@@ -115,33 +131,31 @@ in building their own package registry.
 Currently, the identity of a package is computed from
 the last path component of its effective URL
 (which can be changed with dependency mirroring).
-However, this approach can lead to conflation of
+However, this approach can lead to a conflation of
 distinct packages with similar names
-as well as duplication of the same package under different names.
+and the duplication of the same package under different names.
 
-We propose using a namespace-scoped identifier
-in the form `@namespace/PackageName`
+We propose using a scoped identifier
+in the form `@scope/PackageName`
 to identify package dependencies.
 
-A package *namespace* designates a single individual or organization
-within a package registry.
-A namespace consists of
+A *scope* provides a namespace for related packages within a package registry.
+A package scope consists of
 an at-sign (`@`) followed by alphanumeric characters and hyphens.
 Hyphens may not occur at the beginning or end,
-nor consecutively within a package namespace.
-The maximum length of a package namespace is 40 characters.
-A valid package namespace matches the following regular expression pattern:
+nor consecutively within a scope.
+The maximum length of a package scope is 40 characters.
+A valid package scope matches the following regular expression pattern:
 
 ```regexp
 \A@[a-zA-Z\d](?:[a-zA-Z\d]|-(?=[a-zA-Z\d])){0,39}\z
 ```
 
-A package's *name* is specified by the `name` parameter
-provided in its manifest (`Package.swift`) file.
-A package name must be unique within the scope of its namespace.
+A package's *name* is specified by the `name` provided in its manifest.
 
-The maximum length of a package namespace is 128 characters.
-A valid package namespace matches the following regular expression pattern:
+The maximum length of a package scope is 128 characters.
+A valid package name matches the following regular expression pattern:
+
 
 ```regexp
 \A\p{XID_Start}\p{XID_Continue}{0,127}\z
@@ -150,11 +164,10 @@ A valid package namespace matches the following regular expression pattern:
 > For more information,
 > see [Unicode Identifier and Pattern Syntax][UAX31].
 
-Package namespaces are case-insensitive
+Package scopes are case-insensitive
 (for example, `mona` ≍ `MONA`).
 Package names are
-case-insensitive
-(for example, `mona` ≍ `MONA`),
+case-insensitive,
 diacritic-insensitive
 (for example, `Å` ≍ `A`), and
 width-insensitive
@@ -209,58 +222,6 @@ dependencies: [
 ]
 ```
 
-#### Automatic migration for URL-based dependencies
-
-For compatibility with previous versions of Swift,
-Swift Package Manager may resolve a `.package` dependency declaration
-that specifies a `name` and `url`
-using its equivalent package identity
-if it satisfies the following criteria:
-
-* The dependency has a url with an `https` scheme
-  and a hostname equal to `github.com`.
-* The dependency url doesn't contain
-  a userinfo component,
-  a port subcomponent,
-  a query component,
-  or a fragment component.
-* The path component of the dependency url
-  consists of two segments separated by a slash (`/`)
-  with no trailing slash.
-  * The first path segment is a valid package identifier namespace.
-  * The last path segment is a valid package name
-    equal to the declared package name,
-    and doesn't contain a file extension (for example, `.git`).
-* The dependency specifies an exact version or range of versions.
-
-Packages with an alternate location specified by a [dependency mirror][SE-0219]
-can be resolved only using Git.
-
-The resulting package identity consists of an at sign (`@`)
-followed by the first path component of the url,
-a slash (`/`),
-and the package name.
-For example,
-here are a list of dependencies that do and don't qualify:
-
-```swift
-// ✅ These dependencies will resolve through a package registry
-//    using the package identity `@mona/LinkedList`.
-.package(name: "LinkedList", url: "https://github.com/mona/LinkedList", from: "1.1.0")
-.package(name: "LinkedList", url: "https://github.com/mona/LinkedList", .exact("1.1.0"))
-.package(name: "LinkedList", url: "https://github.com/mona/LinkedList", .upToNextMajor(from: "1.1.0"))
-.package(name: "LinkedList", url: "https://github.com/mona/LinkedList", .upToNextMinor(from: "1.1.0"))
-
-// ❌ These dependencies can only be resolved using Git
-.package(url: "https://github.com/mona/LinkedList", from: "1.1.0") // No name
-.package(name: "SwiftLinkedList", url: "https://github.com/mona/LinkedList", from: "1.1.0") // Name doesn't match last path component of url
-.package(name: "LinkedList", url: "git@github.com:mona/LinkedList.git", from: "1.1.0") // No https scheme
-.package(name: "LinkedList", url: "https://github.com/mona/LinkedList.git", from: "1.1.0") // .git file extension
-.package(name: "LinkedList", url: "https://github.com/mona/LinkedList", .branch("master")) // No version
-.package(name: "LinkedList", url: "https://github.com/mona/LinkedList", .revision("d6ca4e56219a8a5f0237d6dcdd8b975ec7e24c89")) // No version
-.package(path: "../LinkedList") // No url or name
-```
-
 #### Module name collision resolution
 
 Swift Package Manager cannot build a project
@@ -275,10 +236,6 @@ if any of the following are true:
 3. Two or more modules provided by packages in the project
    have the same name
    (`let package = Package(products: [.library(name: "LinkedList")])`)
-
-This proposal directly addresses points #2 and #3
-and describes a possible resolution for point #1 under
-["Future Directions"](#package-dependency-url-normalization).
 
 Consider the following package manifest,
 which Swift Package Manager currently fails to resolve
@@ -316,7 +273,7 @@ let package = Package(name: "Example",
 ```
 
 Ambiguous `name` parameters for dependency `.package` declarations
-can be resolved by using namespaced package identifiers.
+can be resolved by using scoped package identifiers.
 
 ```diff
 -                        .package(name: "LinkedList",
@@ -344,7 +301,7 @@ to unambiguously reference a particular package's module.
 ```
 
 For compatibility and convenience,
-`.product` declarations may reference a package without its respective namespace
+`.product` declarations may reference a package without its respective scope
 if that package's name is unique within the dependency graph.
 
 #### Dependency graph resolution
@@ -370,17 +327,17 @@ tasks performed by Swift Package Manager during dependency resolution
 alongside the Git operations used
 and their corresponding package registry API calls.
 
-| Task                                  | Git operation               | Registry request                         |
-| ------------------------------------- | --------------------------- | ---------------------------------------- |
-| Fetch the contents of a package       | `git clone && git checkout` | `GET /{namespace}/{package}/{version}.zip`           |
-| List the available tags for a package | `git tag`                   | `GET /{namespace}/{package}`                         |
-| Fetch a package manifest              | `git clone`                 | `GET /{namespace}/{package}/{version}/Package.swift` |
+| Task                                  | Git operation               | Registry request                              |
+| ------------------------------------- | --------------------------- | --------------------------------------------- |
+| Fetch the contents of a package       | `git clone && git checkout` | `GET /{scope}/{name}/{version}.zip`           |
+| List the available tags for a package | `git tag`                   | `GET /{scope}/{name}`                         |
+| Fetch a package manifest              | `git clone`                 | `GET /{scope}/{name}/{version}/Package.swift` |
 
 Package registries support
 [version-specific _manifest_ selection][version-specific-manifest-selection]
 by providing a list of versioned manifest files for a package
 (for example, `Package@swift-5.3.swift`)
-in its response to `GET /{namespace}/{package}/{version}/Package.swift`.
+in its response to `GET /{scope}/{name}/{version}/Package.swift`.
 However, package registries don't support
 [version-specific _tag_ selection][version-specific-tag-selection],
 and instead rely on [Semantic Versioning][SemVer]
@@ -395,7 +352,7 @@ Swift package registry releases are archived as Zip files.
 
 When an external package dependency is downloaded through a registry,
 Swift Package Manager compares the integrity checksum provided by the server
-against any existing checksum for that release in `Package.resolved`
+against any existing checksum for that release in the `Package.resolved` file
 as well as the integrity checksum reported by the `compute-checksum` subcommand:
 
 ```terminal
@@ -423,9 +380,11 @@ it's saved to `Package.resolved`.
 }
 ```
 
-If the checksum reported by the server is different from the existing checksum
-(or the checksum of the downloaded artifact is different from either of them),
-that's an indication that a package's contents may have changed at some point.
+Suppose the checksum reported by the server
+is different from the existing checksum
+(or the checksum of the downloaded artifact is different from either of them).
+In that case,
+a package's contents may have changed at some point.
 Swift Package Manager will refuse to download dependencies
 if there's a mismatch in integrity checksums.
 
@@ -484,10 +443,10 @@ Created LinkedList.zip
 ```
 
 By default,
-the filename of the generated archive is
+generated archive's filename is
 the name of the package with a `.zip` extension
 (for example, "LinkedList.zip").
-This can be configured with the `--output` option:
+You can override this behavior with the `--output` option:
 
 ```terminal
 $ git checkout 1.2.0
@@ -504,50 +463,47 @@ equivalent output to the previous example:
 $ git archive --format zip --output LinkedList-1.2.0.zip 1.2.0
 ```
 
-If desired, this behavior may be changed in future tool versions.
+If desired, this behavior could be changed in future tool versions.
 
 > **Note**:
 > `git-archive` ignores files with the `export-ignore` Git attribute.
 > By default, this ignores hidden files and directories,
 > including`.git` and `.build`.
 
-### Changes to config subcommand
+### Registry configuration subcommands
 
-#### Set-registry subcommand
+This proposal adds new `swift package config registry` subcommands
+that allow users to set the registry used for all packages
+and/or packages in a particular scope.
 
-By default,
-Swift Package Manager resolves package dependencies with namespaced identifiers
-using a predefined package registry.
+Custom registries can serve a variety of purposes:
 
-This proposal adds a new `swift package config set-registry` subcommand
-that lets users specify one or more comma-delimited (`,`) registry URLs
-to be consulted, in order,
-when resolving dependencies through the package registry interface.
+- **Private dependencies**:
+  Users may configure a custom registry for a particular scope
+  to incorporate private packages with those fetched from a public registry.
+- **Geographic colocation**:
+  Developers working under adverse networking conditions can
+  host a mirror of official package sources on a nearby network.
+- **Policy enforcement**:
+  A corporate network can enforce quality or licensing standards,
+  so that only approved packages are available through a custom registry.
+- **Auditing**:
+  A custom registry may analyze or meter access to packages
+  for the purposes of ranking popularity or charging licensing fees.
+
+#### Setting a custom registry
 
 ```manpage
 SYNOPSIS
-	swift package config set-registry <url>[,<url>]...
-
-OPTIONS
-	-o <file>, --output=<file>
-		Write the archive to <file>.
-		If unspecified, the package is written to `\(PackageName).zip`.
+	swift package config set-registry <url> [options]
+OPTIONS:
+  --scope     Associate the registry with a given scope
 ```
 
 Running this subcommand in the root directory of a package
 creates or updates the `.swiftpm/config` file
 with a new top-level `registries` key
 that's associated with an array containing the specified registry URLs.
-
-```json
-{
-  "registries": [
-      "https://internal.example.com"
-  ],
-  "version": 1
-}
-
-```
 
 For example,
 a build server that doesn't allow external network connections
@@ -556,31 +512,83 @@ using an internal registry service.
 
 ```terminal
 $ swift package config set-registry https://internal.example.com/
+$ cat .swiftpm/config
 ```
 
-A custom registry can be used for a variety of purposes:
+```json
+{
+  "registries": {
+    "default": { 
+      "url": "https://internal.example.com" 
+    }
+  },
+  "version": 1
+}
 
-- **Geographic colocation**:
-  Developers working under adverse networking conditions can
-  host a mirror of official package sources on a nearby network.
-- **Policy enforcement**:
-  A corporate network can enforce quality or licensing standards,
-  so that only approved packages are available.
-- **Auditing**:
-  A registry may analyze or meter access to packages
-  for the purposes of ranking popularity or charging licensing fees.
+```
 
-#### Unset-registry subcommand
+If no registry is configured,
+Swift Package Manager commands like
+`swift package resolve` and `swift package update`
+fail with an error.
+
+```terminal
+$ swift package resolve
+error: cannot resolve dependency '@mona/LinkedList' without a configured registry
+```
+
+#### Associating a registry with a scope
+
+The user can associate a package scope with a custom registry
+by passing the `--scope` option.
+
+For example,
+a user might resolve all packages with the package scope `@example`
+(such as `@example/PriorityQueue`)
+to a private registry.
+
+```terminal
+$ swift package config set-registry https://internal.example.com/ --scope @example
+$ cat .swiftpm/config
+```
+
+```json
+{
+  "registries": { 
+    "@example": {
+      "url": "https://internal.example.com"
+    }
+  },
+  "version": 1
+}
+
+```
+
+When a custom registry is associated with a package scope,
+package dependencies with that scope are resolved through the provided URL.
+A custom registry may be associated with one or more scopes,
+but a scope may be associated with only a single registry at a time.
+Scoped custom registries override any unscoped custom registry.
+
+#### Unsetting a custom registry
 
 This proposal also adds a new `swift package config unset-registry` subcommand
 to complement the `set-registry` command.
 
+```manpage
+SYNOPSIS
+	swift package config unset-registry <url> [options]
+OPTIONS:
+  --scope     Removes the registry's association to a given scope
+```
+
 Running the `unset-registry` subcommand in the root directory of a package
 updates the `.swiftpm/config` file
-to remove any top-level `registries` key.
-If the resulting configuration is empty
-(that is, containing only a top-level `version` key),
-this command deletes the `.swiftpm/config` file.
+to remove the `default` entry in the top-level `registries` key, if present.
+If a `--scope` option is passed,
+only the entry for the specified scope is removed, if present.
+
+### Changes to config subcommand
 
 #### Set-mirror option for package identifiers
 
@@ -628,10 +636,10 @@ and a package registry can offer stronger guarantees for safety and security
 compared to downloading dependencies using Git.
 
 Core security measures,
-such as use of HTTPS and integrity checksums,
+such as the use of HTTPS and integrity checksums,
 are required by the registry service specification.
 Additional decisions about security
-are delegated to to the registries themselves.
+are delegated to the registries themselves.
 For example,
 registries are encouraged to adopt a
 scoped, revocable authorization framework like [OAuth 2.0][RFC 6749],
@@ -643,23 +651,27 @@ when deciding where to host and fetch packages.
 Our proposal's package identity scheme is designed to prevent or mitigate
 vulnerabilities common to packaging systems and networked applications:
 
-- Namespaces are clearly marked by an at-sign (`@`) prefix
+- Package scopes are marked by an at-sign (`@`) prefix
   and restricted to a limited set of characters,
-  which prevents [homograph attacks].
+  preventing [homograph attacks].
   For example,
-  "А" (U+0410 CYRILLIC CAPITAL LETTER A) is an invalid namespace character,
+  "А" (U+0410 CYRILLIC CAPITAL LETTER A) is an invalid scope character
   and cannot be confused for "A" (U+0041 LATIN CAPITAL LETTER A).
-- Namespaces disallow leading, trailing, or consecutive hyphens (`-`),
-  which mitigates look-alike namespace and package names
-  (for example, "@llvm--swift",
-  is invalid and cannot be confused for "@llvm-swift")
-- Packages are registered within a namespace scope,
+- Package scopes disallow leading, trailing, or consecutive hyphens (`-`),
+  and disallows underscores (`_`) entirely,
+  which mitigates look-alike package scopes
+  (for example, "@llvm--swift" and "@llvm_swift" are both invalid
+  and cannot be confused for "@llvm-swift").
+- Package scopes disallow dots (`.`),
+  which prevents potential confusion with domain variants of scopes
+  (for example, "@apple.com" is invalid
+  and cannot be confused for "@apple").
+- Packages are registered within a scope,
   which mitigates [typosquatting].
-  Package registries may further restrict the assignment of new namespaces
+  Package registries may further restrict the assignment of new scopes
   that are intentionally misleading
-  (for example "@G00gle", which looks like "@Google").
-- Package names must be valid Swift identifiers,
-  which disallow punctuation and whitespace characters used in
+  (for example, "@G00gle", which looks like "@Google").
+- Package names disallow punctuation and whitespace characters used in
   [cross-site scripting][xss] and
   [CRLF injection][http header injection] attacks.
 
@@ -711,9 +723,11 @@ and provide a valid checksum for a malicious package.
 
 `Package.resolved` provides a [Trust on first use (TOFU)][TOFU] security model
 that can offer strong guarantees about the integrity of dependencies over time.
-A registry can further improve on this model
-by implementing a [transparent log] or some comparable,
-tamper-proof system for associating artifacts with valid checksums.
+A registry can further improve on this model by implementing a
+[transparent log],
+[checksum database],
+or another comparable, tamper-proof system
+for authenticating package contents.
 
 ### Repudiation
 
@@ -727,12 +741,35 @@ Unless you can establish a direct connection between
 an artifact and a commit in a source tree,
 there's no way to determine the provenance of that artifact.
 
-Both a checksum database and the use of digital signatures
-can provide similar non-repudiation guarantees.
+Source archives generated by [`git-archive(1)`]
+include the checksum of the `HEAD` commit as a comment.
+If the history of a project is available
+and the commit used to generate the source archive is signed with [GPG],
+the cryptographic signature may be used to verify the authenticity.
+
+```terminal
+$ git rev-parse HEAD
+b7c37c81f164e5dce0f64e3d75c79a48fb1fe00b3
+
+$ swift package archive-source -o LinkedList-1.2.0.zip
+Generated LinkedList-1.2.0.zip
+
+$ zipnote LinkedList-1.2.0.zip | grep "@ (zip file comment below this line)" -A 1 | tail -n 1
+b7c37c81f164e5dce0f64e3d75c79a48fb1fe00b3
+
+$ git verify-commit b7c37c81f164e5dce0f64e3d75c79a48fb1fe00b3
+gpg: Signature made Tue Dec 16 00:00:00 2020 PST
+gpg:                using RSA key BFAA7114B920808AA4365C203C5C1CF
+gpg: Good signature from "Mona Lisa Octocat <mona@noreply.github.com>" [ultimate]
+```
+
+Otherwise,
+a checksum database and the use of digital signatures
+can both provide similar non-repudiation guarantees.
 
 ### Information disclosure
 
-A user may inadvertently reveal the existence of a private registry service
+A user may inadvertently reveal the existence of a private registry
 or expose hardcoded credentials
 by checking in their project's `.swiftpm/config` file.
 
@@ -741,25 +778,32 @@ and attempt to reuse those credentials to impersonate the user.
 
 ```json
 {
-  "registries": [
-      "https://<USERNAME>:<TOKEN>@swift.pkg.github.com/<OWNER>/"
-  ],
+  "registries": {
+      "default": {
+        "url": "https://<USERNAME>:<TOKEN>@swift.pkg.github.com/<OWNER>/"
+      }
+  },
   "version": 1
 }
 
 ```
 
 This kind of attack can be mitigated on an individual basis
-adding `.swiftpm/config` to a project's `.gitignore` file.
+by adding `.swiftpm/config` to a project's `.gitignore` file.
 The risk could be mitigated for all users
 if Swift Package Manager included a `.gitignore` file
 in its new project template.
-Code hosting providers can also help mitigate this risk
+Code hosting providers can also help minimize this risk
 by [detecting secrets][secret scanning]
 that are committed to public repositories.
 
-> **Important**:
-> Never store credentials in code.
+Credentials may also be unintentionally disclosed
+by Swift Package Manager or other tools in logging statements.
+Care should be taken to redact the user info component of URLs
+when displaying feedback to the user
+(for example,
+the URL `https://<USERNAME>:<TOKEN>@swift.pkg.github.com`
+is logged as `https://***@swift.pkg.github.com`).
 
 ### Denial of service
 
@@ -778,19 +822,12 @@ Even authentic packages from trusted creators can contain malicious code.
 
 Code analysis tools can help to some degree,
 as can system permissions and other OS-level security features.
-But developers are ultimately the ones responsible
-for the code they ship to users.
+However, developers are ultimately responsible for the code they ship to users.
 
 ## Impact on existing packages
 
 Current packages won't be affected by this change,
-as they'll continue to be able to download dependencies directly through Git.
-
-Swift Package Manager can migrate existing package dependencies
-to take advantage of Swift package registries
-without changing their specification,
-as described in
-"[Automatic migration for URL-based dependencies"](#automatic-migration-for-url-based-dependencies).
+as they'll continue to download dependencies directly through Git.
 
 ## Alternatives considered
 
@@ -806,7 +843,7 @@ use [reverse domain name notation] to identify software components
 (for example, `com.squareup.okhttp3`).
 
 We considered these and other schemes for identifying packages,
-but they were rejected in favor of a namespace-scoped package identity
+but they were rejected in favor of a scoped package identity
 similar to the one used by [npm].
 
 ### Use of `tar` or other archive formats
@@ -814,18 +851,19 @@ similar to the one used by [npm].
 Swift Package Manager currently uses Zip archives for binary dependencies,
 which is reason enough to use it again here.
 
+Zip files are also a convenient format for package registries,
+because they support the access of individual files within an archive.
+This allows a registry to satisfy
+the package manifest endpoint
+(`GET /{scope}/{name}/{version}/Package.swift`)
+without storing anything separately from the archive used for the
+package archive endpoint 
+(`GET /{scope}/{name}/{version}.zip`).
+
 We briefly considered `tar` as an archive format
 but concluded that its behavior of preserving symbolic links and executable bits
 served no useful purpose in the context of package management,
 and instead raised concerns about portability and security.
-
-> As an aside,
-> Zip files are also a convenient format for package registries,
-> because they support the access of individual files within an archive.
-> This allows a registry to satisfy
-> the package manifest endpoint (`GET /{namespace}/{package}/{version}/Package.swift`)
-> without storing anything separately from the archive used for the
-> package archive endpoint (`GET /{namespace}/{package}/{version}.zip`).
 
 ### Addition of an `unarchive-source` subcommand
 
@@ -839,12 +877,12 @@ with the source code for that package.
 
 We considered including a complementary `unarchive-source` subcommand
 but ultimately decided against it,
-reason being that unarchiving a Zip archive
+the reason being that unarchiving a Zip archive
 is unambiguous and well-supported on most platforms.
 
 ### Use of digital signatures
 
-[SE-0272] includes discussion about
+[SE-0272] includes a discussion about
 the use of digital signatures for binary dependencies,
 concluding that they were unsuitable
 because of complexity around transitive dependencies.
@@ -878,7 +916,7 @@ a package with an ["scp-style" URL][scp-url] like
 may be determined to be equivalent to a package with an HTTPS scheme like
 `https:///github.com/mona/LinkedList`.
 
-### Offline cache
+### Local offline cache
 
 Swift Package Manager could implement an [offline cache]
 that would allow it to work without network access.
@@ -892,6 +930,7 @@ A package registry is responsible for determining
 which package releases are made available to a consumer.
 This proposal sets no policies for how
 package releases are published to a registry.
+Nor does it specify how package scopes are registered or verified.
 
 Many package managers —
 including the ones mentioned above —
@@ -899,7 +938,7 @@ and artifact repository services, such as
 [Docker Hub],
 [JFrog Artifactory],
 and [AWS CodeArtifact]
-follow what we describe as a <dfn>"push"</dfn> model of publication:
+follow what we describe as a *"push"* model of publication:
 When a package owner wants to releases a new version of their software,
 they produce a build locally and push the resulting artifact to a server.
 This model has the benefit of operational simplicity and flexibility.
@@ -910,7 +949,7 @@ before uploading them to the server.
 Alternatively,
 a system might incorporate build automation techniques like
 continuous integration (CI) and continuous delivery (CD)
-into what we describe as a "pull" model:
+into what we describe as a *"pull"* model:
 When a package owner wants to release a new version of their software,
 their sole responsibility is to notify the package registry;
 the server does all the work of downloading the source code
@@ -920,20 +959,18 @@ reproducibility, quality assurance, and software traceability.
 
 We intend to work with industry stakeholders
 to develop standards for publishing Swift packages
-in a future, optional extension to the registry specification.
+in an optional extension to the registry specification.
 
 ### Package removal
 
 There are several reasons why a package release may be removed, including:
 
 * The package maintainer publishing a release by mistake
-* A security vulnerability being discovered in a release
+* A security researcher disclosing a vulnerability for a release
 * The registry being compelled by law enforcement to remove a release
 
 However, removing a package release has the potential to
 break any packages that depend on it.
-Many package management systems have their own processes for
-how removal works (or whether it's supported in the first place).
 
 It's unclear whether or to what extent such policies should be
 informed by registry specification itself.
@@ -974,14 +1011,14 @@ let package = Package(
 )
 ```
 
-### Package installation from the command-line
+### Updates to package editor commands
 
-Swift Package Manager could be extended with an `install` subcommand
-that lets users add a dependency to their package manifest
-using its namespace-scoped name.
+[Package editor commands][SE-0301], if accepted,
+could be extended to add dependencies using scoped identifiers
+in addition to URLs.
 
 ```terminal
-$ swift package install @mona/LinkedList
+$ swift package add-dependency @mona/LinkedList
 # Installed LinkedList 1.2.0
 ```
 
@@ -989,7 +1026,7 @@ $ swift package install @mona/LinkedList
 +    .package("@mona/LinkedList", .exact("1.2.0"))
 ```
 
-### Security auditing
+### Security audits
 
 The response for listing package releases could be updated to include
 information about security advisories.
@@ -1016,19 +1053,19 @@ or as part of a new `swift package audit` subcommand.
 
 ```terminal
 $ swift package audit
-┌───────────────┬──────────────────────────────────────────────────────────────┐
-│ High          │ Regular Expression Denial of Service                         │
-├───────────────┼──────────────────────────────────────────────────────────────┤
-│ Package       │ @mona/RegEx                                                  │
-├───────────────┼──────────────────────────────────────────────────────────────┤
-│ Dependency of │ PatternMatcher                                               │
-├───────────────┼──────────────────────────────────────────────────────────────┤
-│ Path          │ SomePackage > PatternMatcher > RegEx                         │
-├───────────────┼──────────────────────────────────────────────────────────────┤
-│ More info     │ https://example.com/advisories/526                           │
-└───────────────┴──────────────────────────────────────────────────────────────┘
+┌───────────────┬────────────────────────────────────────────────┐
+│ High          │ Regular Expression Denial of Service           │
+├───────────────┼────────────────────────────────────────────────┤
+│ Package       │ @mona/RegEx                                    │
+├───────────────┼────────────────────────────────────────────────┤
+│ Dependency of │ PatternMatcher                                 │
+├───────────────┼────────────────────────────────────────────────┤
+│ Path          │ SomePackage > PatternMatcher > RegEx           │
+├───────────────┼────────────────────────────────────────────────┤
+│ More info     │ https://example.com/advisories/526             │
+└───────────────┴────────────────────────────────────────────────┘
 
-Found 3 vulnerability (1 low, 1 moderate, 1 high) in 12 scanned packages.
+Found 3 vulnerabilities (1 low, 1 moderate, 1 high) in 8 scanned packages.
   Run `swift package audit fix` to fix 3 of them.
 ```
 
@@ -1047,7 +1084,24 @@ LinkedList (github.com/mona/LinkedList) - One thing links to another.
 RegEx (github.com/mona/RegEx) - Expressions on the reg.
 ```
 
+[AWS CodeArtifact]: https://aws.amazon.com/codeartifact/
 [BCP 13]: https://tools.ietf.org/html/rfc6838 "Media Type Specifications and Registration Procedures"
+[CDN]: https://en.wikipedia.org/wiki/Content_delivery_network "Content delivery network"
+[checksum database]: https://sum.golang.org "Go Module Mirror, Index, and Checksum Database"
+[CocoaPods]: https://cocoapods.org "A dependency manager for Swift and Objective-C Cocoa projects"
+[crates.io]: https://crates.io "crates.io: The Rust community’s crate registry"
+[Docker Hub]: https://hub.docker.com
+[GPG]: https://gnupg.org
+[homograph attacks]: https://en.wikipedia.org/wiki/IDN_homograph_attack
+[http header injection]: https://en.wikipedia.org/wiki/HTTP_header_injection
+[ICANN]: https://www.icann.org
+[JFrog Artifactory]: https://jfrog.com/artifactory/
+[JSON-LD]: https://w3c.github.io/json-ld-syntax/ "JSON-LD 1.1: A JSON-based Serialization for Linked Data"
+[Maven]: https://maven.apache.org
+[npm]: https://www.npmjs.com "The npm Registry"
+[offline cache]: https://yarnpkg.com/features/offline-cache "Offline Cache | Yarn - Package Manager"
+[PyPI]: https://pypi.org "PyPI: The Python Package Index"
+[reverse domain name notation]: https://en.wikipedia.org/wiki/Reverse_domain_name_notation
 [RFC 2119]: https://tools.ietf.org/html/rfc2119 "Key words for use in RFCs to Indicate Requirement Levels"
 [RFC 3230]: https://tools.ietf.org/html/rfc5843 "Instance Digests in HTTP"
 [RFC 3492]: https://tools.ietf.org/html/rfc3492 "Punycode: A Bootstring encoding of Unicode for Internationalized Domain Names in Applications (IDNA)"
@@ -1065,47 +1119,26 @@ RegEx (github.com/mona/RegEx) - Expressions on the reg.
 [RFC 7807]: https://tools.ietf.org/html/rfc7807 "Problem Details for HTTP APIs"
 [RFC 8288]: https://tools.ietf.org/html/rfc8288 "Web Linking"
 [RFC 8446]: https://tools.ietf.org/html/rfc8446 "The Transport Layer Security (TLS) Protocol Version 1.3"
+[RubyGems]: https://rubygems.org "RubyGems: The Ruby community’s gem hosting service"
+[Schema.org]: https://schema.org/
+[scp-url]: https://git-scm.com/book/en/v2/Git-on-the-Server-The-Protocols#_the_ssh_protocol
+[SE-0219]: https://github.com/apple/swift-evolution/blob/master/proposals/0219-package-manager-dependency-mirroring.md "Package Manager Dependency Mirroring"
+[SE-0272]: https://github.com/apple/swift-evolution/blob/master/proposals/0272-swiftpm-binary-dependencies.md "Package Manager Binary Dependencies"
+[SE-0301]: https://github.com/apple/swift-evolution/blob/main/proposals/0301-package-editing-commands.md "Package Editor Commands"
+[secret scanning]: https://docs.github.com/en/github/administering-a-repository/about-secret-scanning
+[SemVer]: https://semver.org/ "Semantic Versioning"
+[SoftwareSourceCode]: https://schema.org/SoftwareSourceCode
+[STRIDE]: https://en.wikipedia.org/wiki/STRIDE_(security) "STRIDE (security)"
+[thundering herd effect]: https://en.wikipedia.org/wiki/Thundering_herd_problem "Thundering herd problem"
+[TOFU]: https://en.wikipedia.org/wiki/Trust_on_first_use "Trust on First Use"
+[transparent log]: https://research.swtch.com/tlog
+[typosquatting]: https://en.wikipedia.org/wiki/Typosquatting
 [UAX15]: http://www.unicode.org/reports/tr15/ "Unicode Technical Report #15: Unicode Normalization Forms"
 [UAX18]: http://www.unicode.org/reports/tr18/ "Unicode Technical Report #18: Unicode Regular Expressions"
 [UAX31]: http://www.unicode.org/reports/tr31/ "Unicode Technical Report #31: Unicode Identifier and Pattern Syntax"
 [UAX36]: http://www.unicode.org/reports/tr36/ "Unicode Technical Report #36: Unicode Security Considerations"
-[IANA Link Relations]: https://www.iana.org/assignments/link-relations/link-relations.xhtml
-[JSON-LD]: https://w3c.github.io/json-ld-syntax/ "JSON-LD 1.1: A JSON-based Serialization for Linked Data"
-[SemVer]: https://semver.org/ "Semantic Versioning"
-[Schema.org]: https://schema.org/
-[SoftwareSourceCode]: https://schema.org/SoftwareSourceCode
-[DUST]: https://doi.org/10.1145/1462148.1462151 "Bar-Yossef, Ziv, et al. Do Not Crawl in the DUST: Different URLs with Similar Text. Association for Computing Machinery, 17 Jan. 2009. January 2009"
-[GitHub / Swift Package Management Service]: https://forums.swift.org/t/github-swift-package-management-service/30406
-[RubyGems]: https://rubygems.org "RubyGems: The Ruby community’s gem hosting service"
-[PyPI]: https://pypi.org "PyPI: The Python Package Index"
-[npm]: https://www.npmjs.com "The npm Registry"
-[crates.io]: https://crates.io "crates.io: The Rust community’s crate registry"
-[CocoaPods]: https://cocoapods.org "A dependency manager for Swift and Objective-C Cocoa projects"
-[reverse domain name notation]: https://en.wikipedia.org/wiki/Reverse_domain_name_notation
 [UTI]: https://en.wikipedia.org/wiki/Uniform_Type_Identifier
-[Maven]: https://maven.apache.org
-[Docker Hub]: https://hub.docker.com
-[JFrog Artifactory]: https://jfrog.com/artifactory/
-[AWS CodeArtifact]: https://aws.amazon.com/codeartifact/
-[ICANN]: https://www.icann.org
-[thundering herd effect]: https://en.wikipedia.org/wiki/Thundering_herd_problem "Thundering herd problem"
-[offline cache]: https://yarnpkg.com/features/offline-cache "Offline Cache | Yarn - Package Manager"
-[XCFramework]: https://developer.apple.com/videos/play/wwdc2019/416/ "WWDC 2019 Session 416: Binary Frameworks in Swift"
-[SE-0272]: https://github.com/apple/swift-evolution/blob/master/proposals/0272-swiftpm-binary-dependencies.md "Package Manager Binary Dependencies"
-[transparent log]: https://research.swtch.com/tlog
-[TOFU]: https://en.wikipedia.org/wiki/Trust_on_first_use "Trust on First Use"
-[version-specific-tag-selection]: https://github.com/apple/swift-package-manager/blob/master/Documentation/Usage.md#version-specific-tag-selection "Swift Package Manager - Version-specific Tag Selection"
 [version-specific-manifest-selection]: https://github.com/apple/swift-package-manager/blob/master/Documentation/Usage.md#version-specific-manifest-selection "Swift Package Manager - Version-specific Manifest Selection"
-[STRIDE]: https://en.wikipedia.org/wiki/STRIDE_(security) "STRIDE (security)"
-[SE-0219]: https://github.com/apple/swift-evolution/blob/master/proposals/0219-package-manager-dependency-mirroring.md "Package Manager Dependency Mirroring"
-[swift-sh]: https://github.com/mxcl/swift-sh
-[Beak]: https://github.com/yonaskolb/Beak
-[Marathon]: https://github.com/JohnSundell/Marathon
-[tspl]: https://docs.swift.org/swift-book/
-[tspl-identifiers]: https://docs.swift.org/swift-book/ReferenceManual/LexicalStructure.html#ID412
-[scp-url]: https://git-scm.com/book/en/v2/Git-on-the-Server-The-Protocols#_the_ssh_protocol
-[secret scanning]: https://docs.github.com/en/github/administering-a-repository/about-secret-scanning
-[typosquatting]: https://en.wikipedia.org/wiki/Typosquatting
-[homograph attacks]: https://en.wikipedia.org/wiki/IDN_homograph_attack
+[version-specific-tag-selection]: https://github.com/apple/swift-package-manager/blob/master/Documentation/Usage.md#version-specific-tag-selection "Swift Package Manager - Version-specific Tag Selection"
+[XCFramework]: https://developer.apple.com/videos/play/wwdc2019/416/ "WWDC 2019 Session 416: Binary Frameworks in Swift"
 [xss]: https://en.wikipedia.org/wiki/Cross-site_scripting
-[http header injection]: https://en.wikipedia.org/wiki/HTTP_header_injection
