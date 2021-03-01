@@ -109,12 +109,12 @@ for listing releases for a package,
 fetching information about a release,
 and downloading the source archive for a release:
 
-| Method | Path                                                      | Description                                   |
-| ------ | --------------------------------------------------------- | --------------------------------------------- |
-| `GET`  | `/{scope}/{name}`                                         | List package releases                         |
-| `GET`  | `/{scope}/{name}/{version}`                               | Fetch metadata for a package release          |
-| `GET`  | `/{scope}/{name}/{version}/Package.swift{?swift-version}` | Fetch manifest for a package release          |
-| `GET`  | `/{scope}/{name}/{version}.zip`                           | Download source archive for a package release |
+| Method | Path                                                      | Description                                      |
+| ------ | --------------------------------------------------------- | ------------------------------------------------ |
+| `GET`  | `/{scope}/{name}`                                         | List package releases                            |
+| `GET`  | `/{scope}/{name}/{version}`                               | Fetch metadata for a package release             |
+| `GET`  | `/{scope}/{name}/{version}/Package.swift{?swift-version}` | Fetch manifest for a package release             |
+| `GET`  | `/{scope}/{name}/{version}.zip`                           | Download source archive for a package release    |
 
 A formal specification for the package registry interface
 is provided alongside this proposal.
@@ -175,28 +175,17 @@ width-insensitive
 Package names are compared using
 [Normalization Form Compatible Composition (NFKC)][UAX15].
 
-#### New `PackageDescription` APIs
+#### New `PackageDescription` API
 
-The `Package.Dependency` type adds the following static methods:
+The `Package.Dependency` type adds the following static method:
 
 ```swift
 extension Package.Dependency {
     /// Adds a dependency on a package with the specified identifier
     /// that uses the provided version requirement.
     public static func package(
-        _ id: String,
-        url: String? = nil,
+        id: String,
         _ requirement: Package.Dependency.Requirement
-    ) -> Package.Dependency
-
-    /// Adds a dependency on a package with the specified identifier
-    /// that uses the provided version requirement
-    /// starting with the given minimum version,
-    /// going up to the next major version.
-    public static func package(
-        _ id: String,
-        path: String? = nil,
-        from version: Version
     ) -> Package.Dependency
 }
 ```
@@ -206,103 +195,51 @@ to declare one or more dependencies by their respective package identifier.
 
 ```swift
 dependencies: [
-   .package("@mona/LinkedList", from: "1.1.0"),
-   .package("@mona/RegEx", .exact("2.0.0"))
-]
-```
-
-If an explicit `url` or `path` is provided,
-Swift Package Manager resolves the dependency using Git,
-assigning the specified identifier to the package.
-
-```swift
-dependencies: [
-   .package("@mona/LinkedList", url: "https://mona.example.com/LinkedList" from: "1.1.0"),
-   .package("@mona/RegEx", path: "/Users/mona/Code/Regex", .exact("2.0.0"))
+   .package(id: "@mona/LinkedList", from: "1.1.0"),
+   .package(id: "@mona/RegEx", .exact("2.0.0"))
 ]
 ```
 
 #### Module name collision resolution
 
-Swift Package Manager cannot build a project
-if any of the following are true:
+Consider a dependency graph that includes both
+a package declared with the identifier `@mona/LinkedList` and
+an equivalent package declared with the URL `https://github.com/mona/LinkedList`.
 
-1. Two or more packages in the project
-   are located by URLs with the same (case-insensitive) last path component
-   (for example, `github.com/mona/LinkedList` and `github.com/OctoCorp/linkedlist`)
-2. Two or more packages in the project
-   declare the same name in their package manifest
-   (for example, `let package = Package(name: "LinkedList"`))
-3. Two or more modules provided by packages in the project
-   have the same name
-   (`let package = Package(products: [.library(name: "LinkedList")])`)
+When Swift Package Manager fetches a list of releases for the identified package
+(`GET /@mona/LinkedList`),
+the response includes a `Link` header field
+with URLs to that project's source repository
+that are known to the registry.
 
-Consider the following package manifest,
-which Swift Package Manager currently fails to resolve
-for all three of the reasons listed above
-(assume both external dependencies are named "LinkedList"
-and contain a library product named "LinkedList").
-
-```swift
-// swift-tools-version:5.3
-import PackageDescription
-
-let package = Package(name: "Example",
-                      dependencies: [
-                        .package(name: "LinkedList",
-                                 url: "https://github.com/mona/LinkedList",
-                                 from: "1.1.0"),
-                        .package(name: "LinkedList",
-                                 url: "https://github.com/OctoCorp/LinkedList",
-                                 from: "0.1.0")
-                      ],
-                      targets: [
-                        .target(
-                            name: "Greeter",
-                            dependencies: [
-                                .product(name: "LinkedList",
-                                         package: "LinkedList"), // github.com/mona/LinkedList
-                            ])
-                        .target(
-                            name: "Meeter",
-                            dependencies: [
-                                .product(name: "LinkedList",
-                                         package: "LinkedList") // github.com/OctoCorp/linkedlist
-                            ])
-                      ])
+```http
+Link: <https://github.com/mona/LinkedList>; rel="canonical",
+      <ssh://git@github.com:mona/LinkedList.git>; rel="alternate"
 ```
 
-Ambiguous `name` parameters for dependency `.package` declarations
-can be resolved by using scoped package identifiers.
+Swift Package Manager uses this information
+to reconcile the URL-based dependency declaration with
+the package identifier `@mona/LinkedList`.
+
+A package identifier serves as the package name
+in target-based dependency declarations —
+that is, the `package` parameter in `.product(name:package)` method calls.
 
 ```diff
--                        .package(name: "LinkedList",
--                                 url: "https://github.com/mona/LinkedList",
-+                        .package("@mona/LinkedList",
-                                  from: "1.1.0"),
-
--                        .package(name: "LinkedList",
--                                 url: "https://github.com/OctoCorp/LinkedList",
-+                        .package(name: "@OctoCorp/LinkedList",
-                                  from: "0.1.0")
+    targets: [
+        .target(name: "MyLibrary", 
+                dependencies: [
+                  .product(name: "LinkedList",
+-                          package: "LinkedList")
++                          package: "@mona/LinkedList")
+                ]
+    ]
 ```
 
-Package identifiers can be used in `.product` declarations
-to unambiguously reference a particular package's module.
-
-```diff
-                         .product(name: "LinkedList",
--                                 package: "LinkedList"),
-+                                 package: "@mona/LinkedList"),
-
-                         .product(name: "LinkedList",
--                                 package: "LinkedList")
-+                                 package: "@OctoCorp/LinkedList")
-```
-
-For compatibility and convenience,
-`.product` declarations may reference a package without its respective scope
-if that package's name is unique within the dependency graph.
+Any path-based dependency declaration
+or URL-based declaration without a associated package identifier
+will continue to synthesize its identity from
+the last path component of its location.
 
 #### Dependency graph resolution
 
@@ -327,8 +264,8 @@ tasks performed by Swift Package Manager during dependency resolution
 alongside the Git operations used
 and their corresponding package registry API calls.
 
-| Task                                  | Git operation               | Registry request                              |
-| ------------------------------------- | --------------------------- | --------------------------------------------- |
+| Task                                  | Git operation               | Registry request                                     |
+| ------------------------------------- | --------------------------- | ---------------------------------------------------- |
 | Fetch the contents of a package       | `git clone && git checkout` | `GET /{scope}/{name}/{version}.zip`           |
 | List the available tags for a package | `git tag`                   | `GET /{scope}/{name}`                         |
 | Fetch a package manifest              | `git clone`                 | `GET /{scope}/{name}/{version}/Package.swift` |
@@ -472,8 +409,8 @@ If desired, this behavior could be changed in future tool versions.
 
 ### Registry configuration subcommands
 
-This proposal adds new `swift package config registry` subcommands
-that allow users to set the registry used for all packages
+This proposal adds a new `swift package-registry` subcommand
+for managing the registry used for all packages
 and/or packages in a particular scope.
 
 Custom registries can serve a variety of purposes:
@@ -495,13 +432,14 @@ Custom registries can serve a variety of purposes:
 
 ```manpage
 SYNOPSIS
-	swift package config set-registry <url> [options]
+	swift package-registry set <url> [options]
 OPTIONS:
+  --global    Apply settings to all projects for this user
   --scope     Associate the registry with a given scope
 ```
 
 Running this subcommand in the root directory of a package
-creates or updates the `.swiftpm/config` file
+creates or updates the `.swiftpm/config/registries.json` file
 with a new top-level `registries` key
 that's associated with an array containing the specified registry URLs.
 
@@ -511,8 +449,8 @@ may configure a registry URL to resolve dependencies
 using an internal registry service.
 
 ```terminal
-$ swift package config set-registry https://internal.example.com/
-$ cat .swiftpm/config
+$ swift package-registry set https://internal.example.com/
+$ cat .swiftpm/config/registries.json
 ```
 
 ```json
@@ -548,8 +486,8 @@ a user might resolve all packages with the package scope `@example`
 to a private registry.
 
 ```terminal
-$ swift package config set-registry https://internal.example.com/ --scope @example
-$ cat .swiftpm/config
+$ swift package-registry set https://internal.example.com/ --scope @example
+$ cat .swiftpm/config/registries.json
 ```
 
 ```json
@@ -577,8 +515,9 @@ to complement the `set-registry` command.
 
 ```manpage
 SYNOPSIS
-	swift package config unset-registry <url> [options]
+	swift package-registry unset <url> [options]
 OPTIONS:
+  --global    Apply settings to all projects for this user
   --scope     Removes the registry's association to a given scope
 ```
 
@@ -587,6 +526,49 @@ updates the `.swiftpm/config` file
 to remove the `default` entry in the top-level `registries` key, if present.
 If a `--scope` option is passed,
 only the entry for the specified scope is removed, if present.
+
+#### Global registry configuration
+
+The user can pass the `--global` option to the `set` or `unset` subcommands
+to update the user-level configuration file located at
+`~/.swiftpm/config/registries.json`.
+
+Any default or scoped registries configured locally in a project directory
+override any values configured globally for the user.
+For example,
+consider the following global and local registry configuration files:
+
+```jsonc
+// Global configuration (~/.swiftpm/config/registries.json)
+{
+  "registries": { 
+    "default": {
+      "url": "https://global.example.com"
+    },
+    "@foo": {
+      "url": "https://global.example.com"
+    },
+  },
+  "version": 1
+}
+
+// Local configuration (.swiftpm/config/registries.json)
+{
+  "registries": { 
+    "@foo": {
+      "url": "https://local.example.com"
+    }
+  },
+  "version": 1
+}
+
+```
+
+Running the `swift package resolve` command with these configuration files
+resolves packages with the `@foo` scope
+using the registry located at "https://local.example.com",
+and all other packages
+using the registry located at "https://global.example.com".
 
 ### Changes to config subcommand
 
@@ -857,13 +839,35 @@ This allows a registry to satisfy
 the package manifest endpoint
 (`GET /{scope}/{name}/{version}/Package.swift`)
 without storing anything separately from the archive used for the
-package archive endpoint 
+package archive endpoint
 (`GET /{scope}/{name}/{version}.zip`).
 
 We briefly considered `tar` as an archive format
 but concluded that its behavior of preserving symbolic links and executable bits
 served no useful purpose in the context of package management,
 and instead raised concerns about portability and security.
+
+### Inclusion of alternative source locations in package releases payload
+
+To maintain compatibility with existing, URL-based dependency declarations
+Swift Package Manager needs to reconcile source locations
+with their respective identifiers.
+For example,
+the declarations
+`.package(url: "https://github.com/mona/LinkedList", from: "1.0.0")` and
+`.package(id: "@mona/LinkedList", from: "1.0.0")`,
+must be deemed equivalent
+to resolve a dependency graph that contains both of them.
+
+We considered including alternative source locations in the response body,
+but rejected that in favor of using link relations.
+
+[Web linking][RFC 8288] provides a standard way to
+describe the relationships between resources.
+Standard `canonical` and `alternative` [IANA link relations]
+convey precise semantics for
+the relationship between a package and its source repositories
+that are broadly useful beyond any individual client.
 
 ### Addition of an `unarchive-source` subcommand
 
@@ -1023,7 +1027,7 @@ $ swift package add-dependency @mona/LinkedList
 ```
 
 ```diff
-+    .package("@mona/LinkedList", .exact("1.2.0"))
++    .package(id: "@mona/LinkedList", .exact("1.2.0"))
 ```
 
 ### Security audits
@@ -1094,6 +1098,7 @@ RegEx (github.com/mona/RegEx) - Expressions on the reg.
 [GPG]: https://gnupg.org
 [homograph attacks]: https://en.wikipedia.org/wiki/IDN_homograph_attack
 [http header injection]: https://en.wikipedia.org/wiki/HTTP_header_injection
+[IANA link relations]: https://www.iana.org/assignments/link-relations/link-relations.xhtml "IANA Link Relation Types"
 [ICANN]: https://www.icann.org
 [JFrog Artifactory]: https://jfrog.com/artifactory/
 [JSON-LD]: https://w3c.github.io/json-ld-syntax/ "JSON-LD 1.1: A JSON-based Serialization for Linked Data"
