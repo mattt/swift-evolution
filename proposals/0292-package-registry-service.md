@@ -220,6 +220,12 @@ Link: <https://github.com/mona/LinkedList>; rel="canonical",
 Swift Package Manager uses this information
 to reconcile the URL-based dependency declaration with
 the package identifier `@mona/LinkedList`.
+Link relation URLs may also be normalized to mitigate insignificant variations.
+For example,
+a package with an ["scp-style" URL][scp-url] like
+`git@github.com:mona/LinkedList.git`
+is determined to be equivalent to a URL with an explicit scheme like
+`ssh:///git@github.com/mona/LinkedList`.
 
 A package identifier serves as the package name
 in target-based dependency declarations —
@@ -237,7 +243,7 @@ that is, the `package` parameter in `.product(name:package)` method calls.
 ```
 
 Any path-based dependency declaration
-or URL-based declaration without a associated package identifier
+or URL-based declaration without an associated package identifier
 will continue to synthesize its identity from
 the last path component of its location.
 
@@ -441,7 +447,7 @@ OPTIONS:
 Running this subcommand in the root directory of a package
 creates or updates the `.swiftpm/config/registries.json` file
 with a new top-level `registries` key
-that's associated with an array containing the specified registry URLs.
+that's associated with an object containing the specified registry URLs.
 
 For example,
 a build server that doesn't allow external network connections
@@ -906,20 +912,6 @@ of authenticity and non-repudiation beyond what's possible with checksums alone.
 Defining a standard interface for package registries
 lays the groundwork for several useful features.
 
-### Package dependency URL normalization
-
-As described in ["Module name collision resolution"](#module-name-collision-resolution)
-Swift Package Manager cannot build a project
-if two or more packages in the project
-are located by URLs with the same (case-insensitive) last path component.
-Swift Package Manager may improve support URL-based dependencies
-by normalizing package URLs to mitigate insignificant variations.
-For example,
-a package with an ["scp-style" URL][scp-url] like
-`git@github.com:mona/LinkedList.git`
-may be determined to be equivalent to a package with an HTTPS scheme like
-`https:///github.com/mona/LinkedList`.
-
 ### Local offline cache
 
 Swift Package Manager could implement an [offline cache]
@@ -927,6 +919,21 @@ that would allow it to work without network access.
 While this is technically possible today,
 a package registry makes for a simpler and more secure implementation
 than would otherwise be possible with Git repositories alone.
+
+### Package manifest dependency migration
+
+Swift Package Manager could add tooling
+to help package maintainers adopt registry-supported identifiers
+in their projects.
+
+```terminal
+$ swift package-registry migrate
+```
+
+```diff
+-    .package(url: "https://github.com/mona/LinkedList", .exact("1.2.0"))
++    .package(id: "@mona/LinkedList", .exact("1.2.0"))
+```
 
 ### Package publishing
 
